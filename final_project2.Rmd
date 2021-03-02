@@ -1,0 +1,1755 @@
+---
+title: "Random forest in Big Data "
+output: html_notebook
+---
+
+*The source of the data* :https://www.kaggle.com/capcloudcoder/us-wildfire-data-plus-other-attributes
+
+
+**Used Packages**
+```{r}
+
+library(RColorBrewer)
+library(Hmisc)
+library(data.table)
+library(descr)
+library(dplyr)
+library(plyr)
+library(na.tools)
+library(nnet)
+library(foreign)
+library(class)
+library(psych)
+library(rlang)
+library(caret)
+library(randomForestExplainer)
+library(rpart)
+library(rpart.plot)
+```
+# Data Preparation
+```{r}
+#fire <- read.csv("C:/Users/Elisa SEBASTIAN/Desktop/M2/FW_Veg_Rem_Combined.csv/FW_Veg_Rem_Combined.csv", na.strings="")
+fire <- read.csv("/Users/evamanukyan/Documents/faculté/MAG3-EBDS/projet  2/incendie.csv", na.string="")
+```
+
+*Re-coding and delete some variables:*
+
+```{r}
+#putout_time in integer format
+putout_time=gsub(" days 00:00:00.000000000", "", fire$putout_time) 
+fire <- cbind(c(putout_time), fire)
+setnames(fire,"c(putout_time)","putout_time")
+fire<-fire[,-16]
+fire$putout_time<- as.integer(fire$putout_time)
+
+#Longitude and latitude first for mapping
+fire <- cbind(c(fire$latitude), fire)
+fire <- cbind(c(fire$longitude), fire)
+fire<-fire[,-10:-11]
+setnames(fire,"c(fire$latitude)","latitude")
+setnames(fire,"c(fire$longitude)","longitude")
+
+#Delete some variables
+fire <- fire[ -c(4:6,8, 11:12, 14:23, 25:26) ]
+
+#Convert acres in hectares
+fire$fire_size<- c(fire$fire_size)*0.4046856422 
+
+#Class of fire size
+fire_class <- NULL
+ 
+for(k in 1:55367) {
+   if(fire$fire_size[k]<1000) {
+      fire_class[k] <- '0'
+   } else {
+     fire_class[k]<-'1'
+   }
+}
+
+fire <- cbind(fire, fire_class)
+
+#Vegetation
+
+Vegetation <- NULL
+Vegetation = factor(fire$Vegetation, labels =c('Unknown','Needleleaf_forest','Grassland','Shrubland','Desert','Polar_Desert_Rock','Tropical_broadleaf_forest'))
+
+fire <- cbind(fire, Vegetation)
+fire<-fire[,-8]
+
+```
+
+A fire is labeled as "megafire" when its size is >1000 hectares. (Class 1)
+This will be our variable of interest to know what is the chance that a fire goes into disastrous proportions. 
+
+No NA's (only for putout_time: we will delete it because of the correlation between the fire size and the time it takes to put it down, and also because firefighters doesn't know this parameter when a fire occurs).
+
+# Descriptive statistics
+
+## Some summary and correlations
+```{r}
+summary(fire)
+```
+
+Quantitative variables
+
+```{r}
+quanti=data.frame(longitude=fire$longitude,latitude=fire$latitude,temperature_30days=fire$Temp_pre_30, temperature_15days=fire$Temp_pre_15, temperature_7days=fire$Temp_pre_7, temperature=fire$Temp_cont, wind_30days=fire$Wind_pre_30, wind_15days=fire$Wind_pre_15, wind_7days=fire$Wind_pre_7, wind=fire$Wind_cont, humidity_30days=fire$Hum_pre_30, humidity_15days=fire$Hum_pre_15, humidity_7days=fire$Hum_pre_7, humidity=fire$Hum_cont, precipitation_30days=fire$Prec_pre_30, precipitations_15days=fire$Prec_pre_15, precipitations_7days=fire$Prec_pre_7,precipitations=fire$Prec_cont, remoteness=fire$remoteness)
+```
+
+
+
+```{r}
+quanti.cor=cor(quanti)
+res1 <- cor.mtest(quanti, conf.level = .95)
+corrplot(quanti.cor, method='color', type='upper', number.cex=0.45, order="FPC", tl.col="black", p.mat=res1$p, sig.level = .05, tl.pos = "td", addCoef.col = "black", tl.cex = 0.6, diag=FALSE, col = brewer.pal(n = 8, name = "RdBu"))
+```
+
+```{r}
+quali=c("stat_cause_descr", "fire_class", "state","month")
+
+(chisq.test(table(fire$fire_class, fire$stat_cause_descr)))$p.value
+
+chisq.test(table(fire$fire_class, fire$state))$p.value
+
+chisq.test(table(fire$fire_class, fire$month))$p.value
+
+chisq.test(table(fire$stat_cause_descr, fire$state))$p.value
+
+chisq.test(table(fire$stat_cause_descr, fire$month))$p.value
+
+chisq.test(table(fire$state, fire$month))$p.value
+
+```
+
+p-value really low --> the quantitative variables are not correlated
+
+## Variable of interest
+```{r}
+fire_class <- table(fire$fire_class)
+barplot(fire_class,
+        las =1,
+        col=brewer.pal(6,name='Blues'),
+       border=NA,
+       main= "Frequence of fire size",
+       names.arg=c("Not a megafire", "Megafire"),
+       ylim=c(0,60000))
+
+```
+There are 5685 megafires vs 49682 labeled as 'no'.
+
+```{r}
+class=c(0:1)
+for (i in class){
+  cat('\n Fire size statistics for category', i, '\n')
+  print(summary(fire[fire$fire_class == i, c("fire_size")], basic = T))}
+```
+
+## State
+```{r}
+megafire_state=table(fire[fire$fire_class==1, c("state")])
+megafire_state
+
+```
+
+```{r}
+table(fire$state)
+```
+
+
+```{r}
+plot_usmap(include = c("AK", "AL", "AR", "AZ", "CA","CO","CT","DE","FL","GA","HI","IA","ID","IL","IN","KS","KY","LA","MA","MD","ME","MI","MN","MO","MS","MT","NC","ND","NE","NH","NJ","NM","NV","NY","OH","OK","OR","PA","PR","RI","SC","SD","TN","TX","UT","VA","VT","WA","WI","WV","WY"))
+```
+
+
+
+```{r}
+barplot(megafire_state, col=brewer.pal(7,name='Blues'),
+       border=NA,
+       main= "States where megafires occur \n",
+       ylab="Frequence",
+       cex.names=0.5)
+```
+
+
+
+```{r}
+library(ggplot2)  
+library(maps)
+library(usmap)
+```
+
+```{r}
+fire_map_data=data.frame(longitude=fire$longitude,latitude=fire$latitude,megafire=fire$fire_class )
+```
+
+```{r}
+fire_map_data <- usmap_transform(fire_map_data)
+View(fire_map_data)
+```
+
+
+
+
+```{r}
+plot_usmap("state") +
+  geom_point(data = fire_map_data, aes(x = longitude.1, y=latitude.1,colour=megafire),size=0.4) +
+  labs(title = "US fires",
+       size = "Megafire") +
+  theme(legend.position = "right")
+
+```
+
+```{r}
+table(fire[fire$state=="UT", c("Vegetation")])
+```
+
+
+## Month
+```{r}
+tableau<-table(fire$fire_class,fire$month)
+round(addmargins(prop.table(addmargins(tableau,1),1),2),4)*100
+```
+Looking at this table, we can see that megafires occurs mostly in August. 
+Smallest fires occurs mostly in February. 
+
+
+```{r}
+megafire_month=table(fire[fire$fire_class==1, c("month")])
+barplot(megafire_month, col=brewer.pal(6,name='Blues'),
+       border=NA,
+       main= "Month where megafires occur \n",
+       names.arg=c('Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'),ylab="Frequence")
+```
+
+```{r}
+fire_month=table(fire[fire$fire_class==0, c("month")])
+barplot(fire_month, col=brewer.pal(6,name='Blues'),
+       border=NA,
+       main= "Month where other fires occur \n",
+       names.arg=c('Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'),ylab="Frequence")
+```
+
+
+```{r}
+tab_month_megafire=table(fire$fire_class, fire$month)
+month_megafire = prop.table(tab_month_megafire,1)
+barplot(month_megafire)
+```
+
+
+
+
+```{r}
+month_megafire = tapply(fire$Temp_cont, list(as.factor(fire$fire_class), as.factor(fire$month)), mean)
+barplot(month_megafire, beside = TRUE,
+       col=c('skyblue','deepskyblue4'),
+       border=NA,
+       main= "Mean temperature by month for megafire vs no megafire \n",
+       names.arg=c('Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'),
+       ylab="Mean temperature in Deg C",
+       legend =c('Not a megafire','Megafire') ,
+       ylim=c(0,20))
+```
+
+## Cause of the fire
+
+```{r}
+megafire_cause=table(fire[fire$fire_class==1, c("stat_cause_descr")])
+barplot(megafire_cause, col=brewer.pal(6,name='Blues'),
+        las=2,
+       border=NA,
+       main= "Cause of megafires \n",
+       ylab="Frequence",
+       ylim=c(0,4000),
+       cex.names=0.7)
+```
+
+```{r}
+fire_cause=table(fire[fire$fire_class==0, c("stat_cause_descr")])
+barplot(fire_cause, col=brewer.pal(6,name='Blues'),
+        las=2,
+       border=NA,
+       main= "Cause of other fires \n",
+       ylab="Frequence",
+       ylim=c(0,15000),
+       cex.names=0.7)
+```
+
+## Dominant Vegetation in the area? Not sure
+
+```{r}
+aggregate(x = fire$Temp_cont,by = list(fire$month),FUN = mean)       
+```
+
+
+
+```{r}
+megafire_veg=table(fire[fire$fire_class==1, c("Vegetation")])
+barplot(megafire_veg, col=brewer.pal(6,name='Blues'),
+        las=1,
+       border=NA,
+       main= "Vegetation in the area of megafires \n",
+       ylab="Frequence",
+       ylim=c(0,2000),
+       cex.names=0.55)
+```
+
+```{r}
+table(fire$Vegetation)
+```
+
+
+```{r}
+fire_veg=table(fire[fire$fire_class==0, c("Vegetation")])
+barplot(fire_veg, col=brewer.pal(6,name='Blues'),
+        las=1,
+       border=NA,
+       main= "Vegetation in the area of other fires \n",
+       ylab="Frequence",
+       ylim=c(0,20000),
+       cex.names=0.55)
+```
+
+## Temperature in Deg C
+
+The day of the fire:
+
+```{r}
+#For megafire
+summary(fire$Temp_cont[fire$fire_class == 1], basic = T)
+```
+```{r}
+#for other fire
+summary(fire$Temp_cont[fire$fire_class == 0], basic = T)
+```
+
+
+```{r}
+plot(fire$fire_class, fire$Temp_cont, 
+     main = "Temperature in Deg C during the fire",
+     ylab = "Temperature in Deg C",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"))
+```
+
+Temperature 7 days before:
+```{r}
+#For megafire
+summary(fire$Temp_pre_7[fire$fire_class == 1], basic = T)
+```
+
+```{r}
+#for other fire
+summary(fire$Temp_pre_7[fire$fire_class == 0], basic = T)
+```
+
+```{r}
+plot(fire$fire_class, fire$Temp_pre_7, 
+     main = "Temperature in Deg C 7 days before the fire",
+     ylab = "Temperature in Deg C",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"))
+```
+
+Temperature 15 days before:
+
+```{r}
+#For megafire
+summary(fire$Temp_pre_15[fire$fire_class == 1], basic = T)
+```
+
+```{r}
+#for other fire
+summary(fire$Temp_pre_15[fire$fire_class == 0], basic = T)
+```
+
+```{r}
+plot(fire$fire_class, fire$Temp_pre_15, 
+     main = "Temperature in Deg C 15 days before the fire",
+     ylab = "Temperature in Deg C",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"))
+```
+
+Temperature 30 days before:
+
+```{r}
+#For megafire
+summary(fire$Temp_pre_30[fire$fire_class == 1], basic = T)
+```
+
+```{r}
+#for other fire
+summary(fire$Temp_pre_30[fire$fire_class == 0], basic = T)
+```
+
+```{r}
+plot(fire$fire_class, fire$Temp_pre_30, 
+     main = "Temperature in Deg C 30 days before the fire",
+     ylab = "Temperature in Deg C",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"),
+     outline=FALSE)
+```
+
+## Wind in m/s
+
+Wind in m/s the day of the fire:
+```{r}
+#For megafire
+summary(fire$Wind_cont[fire$fire_class == 1], basic = T)
+```
+
+```{r}
+#for other fire
+summary(fire$Wind_cont[fire$fire_class == 0], basic = T)
+```
+
+```{r}
+plot(fire$fire_class, fire$Temp_pre_30, 
+     main = "Wind in m/s during the fire",
+     ylab = "Wind in m/s",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"),
+     outline=FALSE)
+```
+
+Wind in m/s 7 days before the fire:
+```{r}
+#For megafire
+summary(fire$Wind_pre_7[fire$fire_class == 1], basic = T)
+```
+
+```{r}
+#for other fire
+summary(fire$Wind_pre_7[fire$fire_class == 0], basic = T)
+```
+
+```{r}
+plot(fire$fire_class, fire$Wind_pre_7, 
+     main = "Wind in m/s 7 days before the fire",
+     ylab = "Wind in m/s",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"),
+     outline=FALSE)
+```
+
+Wind in m/s 15 days before the fire:
+```{r}
+#For megafire
+summary(fire$Wind_pre_15[fire$fire_class == 1], basic = T)
+```
+
+```{r}
+#for other fire
+summary(fire$Wind_pre_15[fire$fire_class == 0], basic = T)
+```
+
+```{r}
+plot(fire$fire_class, fire$Wind_pre_15, 
+     main = "Wind in m/s 15 days before the fire",
+     ylab = "Wind in m/s",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"),
+     outline=FALSE)
+```
+
+Wind in m/s 30 days before the fire:
+```{r}
+#For megafire
+summary(fire$Wind_pre_30[fire$fire_class == 1], basic = T)
+```
+
+```{r}
+#for other fire
+summary(fire$Wind_pre_30[fire$fire_class == 0], basic = T)
+```
+
+```{r}
+plot(fire$fire_class, fire$Wind_pre_30, 
+     main = "Wind in m/s 30 days before the fire",
+     ylab = "Wind in m/s",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"),
+     outline=FALSE)
+```
+
+## Precipitations in mm
+
+Precipitations in mm the day of the fire:
+
+## For megafire
+```{r}
+summary(fire$Prec_cont[fire$fire_class == 1], basic = T)
+
+```
+
+```{r}
+#for other fire
+summary(fire$Prec_cont[fire$fire_class == 0], basic = T)
+```
+
+```{r}
+plot(fire$fire_class, fire$Prec_cont, 
+     main = "Precipitations in mm during the fire",
+     ylab = "Precipitations in mm",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"))
+```
+
+Precipitations in mm 7 days before the fire:
+```{r}
+#For megafire
+summary(fire$Prec_pre_7[fire$fire_class == 1], basic = T)
+```
+
+```{r}
+#for other fire
+summary(fire$Prec_pre_7[fire$fire_class == 0], basic = T)
+```
+
+```{r}
+plot(fire$fire_class, fire$Prec_pre_7, 
+     main = "Precipitations in mm 7 days before the fire",
+     ylab = "Precipitations in mm",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"))
+```
+
+Precipitations in mm 15 days before the fire:
+```{r}
+#For megafire
+summary(fire$Prec_pre_15[fire$fire_class == 1], basic = T)
+```
+
+```{r}
+#for other fire
+summary(fire$Prec_pre_15[fire$fire_class == 0], basic = T)
+```
+
+```{r}
+plot(fire$fire_class, fire$Prec_pre_15, 
+     main = "Precipitations in mm 15 days before the fire",
+     ylab = "Precipitations in mm",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"))
+```
+
+Precipitations in mm 30 days before the fire:
+```{r}
+#For megafire
+summary(fire$Prec_pre_30[fire$fire_class == 1], basic = T)
+```
+
+```{r}
+#for other fire
+summary(fire$Prec_pre_30[fire$fire_class == 0], basic = T)
+```
+
+```{r}
+plot(fire$fire_class, fire$Prec_pre_30, 
+     main = "Precipitations in mm 30 days before the fire",
+     ylab = "Precipitations in mm",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"))
+```
+
+## Humidity in %
+
+
+Humidity in % the day of the fire:
+```{r}
+#For megafire
+summary(fire$Hum_cont[fire$fire_class == 1], basic = T)
+```
+
+```{r}
+#for other fire
+summary(fire$Hum_cont[fire$fire_class == 0], basic = T)
+```
+
+```{r}
+plot(fire$fire_class, fire$Hum_cont, 
+     main = "Humidity in % during the fire",
+     ylab = "Humidity in %",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"),
+     outline=FALSE)
+```
+
+Humidity in % 7 days before the fire:
+```{r}
+#For megafire
+summary(fire$Hum_pre_7[fire$fire_class == 1], basic = T)
+```
+
+```{r}
+#for other fire
+summary(fire$Hum_pre_7[fire$fire_class == 0], basic = T)
+```
+
+```{r}
+plot(fire$fire_class, fire$Hum_pre_7, 
+     main = "Humidity in % 7 days before the fire",
+     ylab = "Humidity in %",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"),
+     outline=FALSE)
+```
+
+Humidity in % 15 days before the fire:
+```{r}
+#For megafire
+summary(fire$Hum_pre_15[fire$fire_class == 1], basic = T)
+```
+
+```{r}
+#for other fire
+summary(fire$Hum_pre_15[fire$fire_class == 0], basic = T)
+```
+
+```{r}
+plot(fire$fire_class, fire$Hum_pre_15, 
+     main = "Humidity in % 15 days before the fire",
+     ylab = "Humidity in %",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"),
+     outline=FALSE)
+```
+
+Humidity in % 30 days before the fire:
+```{r}
+#For megafire
+summary(fire$Hum_pre_30[fire$fire_class == 1], basic = T)
+```
+
+```{r}
+#for other fire
+summary(fire$Hum_pre_30[fire$fire_class == 0], basic = T)
+```
+
+```{r}
+plot(fire$fire_class, fire$Hum_pre_30, 
+     main = "Humidity in % 30 days before the fire",
+     ylab = "Humidity in %",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"),
+     outline=FALSE)
+```
+
+## Distance to the closest city (remoteness), rescaled
+
+```{r}
+setNames(aggregate(remoteness ~ fire_class, data=fire, mean, na.rm=TRUE), c("Megafire", "Mean remoteness"))
+setNames(aggregate(remoteness ~ fire_class, data=fire, median, na.rm=TRUE), c("Megafire", "Median remoteness"))
+```
+
+Megafires have a highest mean distance to the closest city then others.
+But if we look at the median we can see that its the inverse. 
+
+Let's do a plot to see the relationship between those:
+```{r}
+plot(fire$fire_class, fire$remoteness, 
+     main = "Distance to the closest city",
+     ylab = "Distance to the closest city (rescaled)",
+     col=brewer.pal(6,name='Blues'),
+     names=c("Not a megafire", "Megafire"),
+     outline=FALSE)
+```
+
+```{r}
+tableau<-table(fire$fire_class, fire$Vegetation)
+round(addmargins(prop.table(addmargins(tableau,1),1),2),4)*100
+```
+
+```{r}
+tableau<-table(fire$fire_class, fire$state)
+round(addmargins(prop.table(addmargins(tableau,1),1),2),4)*100
+```
+
+
+
+# Models
+
+## Preparing the database for models
+
+```{r}
+fire<-fire[,-c(3:4)] #Delete fire_size and putout_time
+fire$fire_class<-as.character(fire$fire_class)
+fire$fire_class <-  factor(fire$fire_class)
+```
+
+```{r}
+#Split of the data base 
+library(caTools)
+
+split <- sample.split(fire$fire_class, SplitRatio =0.8)
+
+train <- subset(fire, split == TRUE)
+test <- subset(fire, split == FALSE)
+```
+
+```{r}
+as.data.frame(table(train$fire_class))
+as.data.frame(table(test$fire_class))
+```
+
+```{r}
+library(UBL)
+#train<-SmoteClassif(fire_class ~., train, C.perc = "balance", k =6,repl=FALSE, dist = "HVDM", p = 2)
+```
+
+
+```{r}
+fire_class_train <- table(train$fire_class)
+barplot(fire_class_train,
+        las =1,
+        col=brewer.pal(6,name='Blues'),
+       border=NA,
+       main= "Frequence of different fire size (training set)",
+       names.arg=c("Not a megafire", "Megafire"),
+       ylim=c(0,25000))
+
+```
+
+```{r}
+#save(train, file = "train.RData")
+load("train.RData")
+```
+
+##Logistic Regression
+
+### Logistic regression with all variables
+
+For a one degree increase in Temp_cont, the odds of being a megafire (versus not being a megafire) increase by a factor of 1.05.
+
+```{r}
+Y_test=test$fire_class
+X_test=test[,-23]
+```
+
+```{r}
+logit <- glm(fire_class ~ state+ Vegetation+ stat_cause_descr+ discovery_month+Temp_pre_30+ Temp_pre_15 + Temp_pre_7 + Temp_cont+ Wind_pre_30 + Wind_pre_15 + Wind_pre_7 + Wind_cont + Hum_pre_30 + Hum_pre_15 + Hum_pre_7 + Hum_cont + Prec_pre_30 + Prec_pre_15 + Prec_pre_7 + Prec_cont + remoteness, data = train, family = "binomial")
+```
+
+```{r}
+summary(logit)
+```
+
+The logistic regression coefficients give the change in the log odds of the outcome for a one unit increase in the predictor variable.
+
+
+```{r}
+null_logit <- glm(fire_class ~ 1,data = train, family="binomial")
+1-logLik(logit)/logLik(null_logit)
+```
+
+```{r}
+#Odds ratio
+as.data.frame(exp(coef(logit)))
+```
+
+
+
+```{r}
+model_prob <- predict(logit, X_test, type = "response")
+```
+
+```{r}
+Y_pred = 1*(model_prob > .8) + 0
+```
+
+```{r}
+accurate = 1*(Y_pred == Y_test)
+print(sum(accurate)/nrow(Y_test))
+```
+
+
+```{r}
+cat("The accuracy of our logit model is:",sum(accurate)/11073)
+```
+
+VIF (for multicolinearity)
+```{r}
+vif(logit)
+```
+
+```{r}
+Y_pred <- as.factor(Y_pred)
+
+precision_log <- posPredValue(Y_pred, Y_test, positive="1")
+sensitivity_log <- sensitivity(Y_pred, Y_test, positive="1")
+
+F1 <- (2 * precision_log * sensitivity_log) / (precision_log + sensitivity_log)
+F1
+```
+
+```{r}
+library(ROCR)
+library(ggplot2)
+predicted_log <- prediction(as.numeric(Y_pred), as.numeric(Y_test))
+perf <- performance(predicted_log, "tpr", "fpr")
+
+plot(perf,
+     avg="threshold",
+     colorize=TRUE,
+     lwd=1,
+     main="ROC Curve for Logistic regression",
+     print.cutoffs.at=seq(0, 1, by=0.05),
+     text.adj=c(-0.5, 0.5),
+     text.cex=0.5)
+grid(col="lightgray")
+axis(1, at=seq(0, 1, by=0.1))
+axis(2, at=seq(0, 1, by=0.1))
+abline(v=c(0.1, 0.3, 0.5, 0.7, 0.9), col="lightgray", lty="dotted")
+abline(h=c(0.1, 0.3, 0.5, 0.7, 0.9), col="lightgray", lty="dotted")
+lines(x=c(0, 1), y=c(0, 1), col="black", lty="dotted")
+```
+
+
+```{r}
+(auc_ROCR_log <- performance(predicted_log, measure = "auc"))
+```
+
+```{r}
+(auc_ROCR_log <- auc_ROCR_log@y.values[[1]])
+```
+
+### Logistic regression with less variables
+```{r}
+logit_2 <- glm(fire_class ~ state+ Vegetation+ stat_cause_descr+ discovery_month+ Temp_cont +  Wind_cont + Hum_cont +  Prec_cont + remoteness, data = train, family = "binomial")
+```
+
+```{r}
+summary(logit_2)
+```
+
+```{r}
+null_logit_2 <- glm(fire_class ~ 1,data = train, family="binomial")
+1-logLik(logit_2)/logLik(null_logit_2)
+```
+
+```{r}
+#Odds ratio
+as.data.frame(exp(coef(logit_2)))
+```
+
+For a one degree increase in Temp_cont, the odds of being a megafire (versus not being a megafire) increase by a factor of 1.05.
+
+
+```{r}
+model_prob_2 <- predict(logit_2, X_test, type = "response")
+```
+
+```{r}
+Y_pred_2 = 1*(model_prob_2 > .8) + 0
+```
+
+```{r}
+accurate_2 = 1*(Y_pred_2 == Y_test)
+print(sum(accurate_2)/nrow(Y_test))
+```
+
+
+```{r}
+cat("The accuracy of our logit model is:",sum(accurate_2)/11073)
+```
+
+Metriccs, et ROC 
+
+```{r}
+#Computing False positives and false negatives 
+ct_log_2 <- table(Y_pred_2,Y_test)
+
+cm_log_2 <- as.matrix(ct_log_2)
+
+multi_class_rates_log_2 <- function(confusion_matrix) {
+    true_positives  <- diag(confusion_matrix)
+    false_positives <- colSums(confusion_matrix) - true_positives
+    false_negatives <- rowSums(confusion_matrix) - true_positives
+    true_negatives  <- sum(confusion_matrix) - true_positives -
+        false_positives - false_negatives
+    return(metrics <- data.frame(true_positives, false_positives, true_negatives,
+                      false_negatives, row.names = names(true_positives)))
+}
+
+multi_class_rates_log_2(cm_log_2)
+```
+
+```{r}
+Y_pred_2 <- as.factor(Y_pred_2)
+
+precision_log_2 <- posPredValue(Y_pred_2, Y_test, positive="1")
+sensitivity_log_2 <- sensitivity(Y_pred_2, Y_test, positive="1")
+specificity_log_2 <- specificity(Y_pred_2, Y_test, negative = "0")
+F1_log2 <- (2* precision_log_2 * sensitivity_log_2) / (precision_log_2 + sensitivity_log_2)
+F1_log2
+```
+```{r}
+precision_log_2
+sensitivity_log_2
+specificity_log_2
+```
+
+
+```{r}
+library(ROCR)
+library(ggplot2)
+predicted_log_2 <- prediction(as.numeric(Y_pred_2), as.numeric(Y_test))
+perf_2 <- performance(predicted_log_2, "tpr", "fpr")
+
+plot(perf_2,
+     avg="threshold",
+     colorize=TRUE,
+     lwd=1,
+     main="ROC Curve for Logistic regression",
+     print.cutoffs.at=seq(0, 1, by=0.05),
+     text.adj=c(-0.5, 0.5),
+     text.cex=0.5)
+grid(col="lightgray")
+axis(1, at=seq(0, 1, by=0.1))
+axis(2, at=seq(0, 1, by=0.1))
+abline(v=c(0.1, 0.3, 0.5, 0.7, 0.9), col="lightgray", lty="dotted")
+abline(h=c(0.1, 0.3, 0.5, 0.7, 0.9), col="lightgray", lty="dotted")
+lines(x=c(0, 1), y=c(0, 1), col="black", lty="dotted")
+```
+
+```{r}
+confusionMatrix(ct_log_2)
+```
+
+```{r}
+(auc_ROCR_log_2 <- performance(predicted_log_2, measure = "auc"))
+```
+
+```{r}
+(auc_ROCR_log_2 <- auc_ROCR_log_2@y.values[[1]])
+```
+
+
+
+
+##KNN
+
+Get dummies
+
+```{r}
+#For the training set
+Vegetation <- as.data.frame(dummy.code(train$Vegetation))
+state <- as.data.frame(dummy.code(train$state))
+discovery_month <- as.data.frame(dummy.code(train$discovery_month))
+stat_cause_descr <- as.data.frame(dummy.code(train$stat_cause_descr))
+train_d <- cbind(train, Vegetation, state, discovery_month,stat_cause_descr)
+train_d<-train_d[,-c(3:5,24)]
+
+#For the test set
+Vegetation <- as.data.frame(dummy.code(test$Vegetation))
+state <- as.data.frame(dummy.code(test$state))
+discovery_month <- as.data.frame(dummy.code(test$discovery_month))
+stat_cause_descr <- as.data.frame(dummy.code(test$stat_cause_descr))
+test_d <- cbind(test, Vegetation, state, discovery_month,stat_cause_descr)
+test_d<-test_d[,-c(3:5,24)]
+
+```
+
+
+Split in X_train, X_test, Y_train, Y_test to use the packages. 
+```{r}
+X_train_KNN<-train_d[,-23]
+X_test_KNN<-test_d[,-23]
+Y_train_KNN<- train_d$fire_class
+Y_test_KNN<-test_d$fire_class
+```
+
+### Use caret package
+In this package, the function picks the optimal number of neighbors (k) for you.
+
+Model
+```{r}
+#library(e1071)
+Nearest_choice<- train(X_train, Y_train, method = "knn", tuneLength = 10,)
+```
+
+```{r}
+#Nearest_choice
+```
+We pick the one with the highest accuracy-> 5
+
+```{r}
+#plot(Nearest_choice)
+```
+
+### Use Class package
+Model
+```{r}
+Nearest <- knn(X_train_KNN,X_test_KNN,cl=Y_train_KNN,k=5)
+```
+
+
+Model Evaluation
+
+```{r}
+# put Y_test in a data frame
+Y_test_KNN <- data.frame(Y_test_KNN)
+
+# merge predictions "Nearest" and "Y_test" 
+class_comparison <- data.frame(Nearest, Y_test_KNN)
+
+# specify column names for "class_comparison"
+names(class_comparison) <- c("Predicted_class", "Observed_class")
+
+# create table examining model accuracy
+CrossTable(x = class_comparison$Observed_class, y = class_comparison$Predicted_class, prop.chisq=FALSE, prop.c = FALSE, prop.r = FALSE, prop.t = FALSE)
+```
+
+
+
+Next, we compare our predicted values to our actual values. The confusion matrix gives an indication of how well our model predicted the actual values.
+The confusion matrix output also shows overall model statistics and statistics by class.
+
+Metriccs, et ROC 
+
+```{r}
+#Computing False positives and false negatives 
+#Computing False positives and false negatives 
+#ct_log_2 <- table(Y_pred_2,Y_test)
+
+#predicted1 <- prediction(as.numeric(predicted), as.numeric(y_test))
+ct_KNN <- table(class_comparison$Predicted_class,class_comparison$Observed_class)
+
+cm_KNN <- as.matrix(ct_KNN)
+
+multi_class_rates_KNN <- function(confusion_matrix) {
+    true_positives  <- diag(confusion_matrix)
+    false_positives <- colSums(confusion_matrix) - true_positives
+    false_negatives <- rowSums(confusion_matrix) - true_positives
+    true_negatives  <- sum(confusion_matrix) - true_positives -
+        false_positives - false_negatives
+    return(metrics <- data.frame(true_positives, false_positives, true_negatives,
+                      false_negatives, row.names = names(true_positives)))
+}
+
+multi_class_rates_KNN(cm_KNN)
+````
+
+```{r}
+#Y_pred_2 <- as.factor(Y_pred_2)
+
+precision_KNN <- negPredValue(class_comparison$Predicted_class,class_comparison$Observed_class, positive="1")
+
+sensitivity_KNN <- sensitivity(class_comparison$Predicted_class, class_comparison$Observed_class, positive="1")
+
+specificity_KNN <- specificity(class_comparison$Predicted_class, class_comparison$Observed_class, negative = "0")
+
+F1_KNN <- (2 * precision_KNN * sensitivity_KNN) / (precision_KNN + sensitivity_KNN)
+
+specificity_KNN
+sensitivity_KNN
+precision_KNN
+F1_KNN
+```
+
+```{r}
+library(ROCR)
+library(ggplot2)
+predicted_KNN <- prediction(as.numeric(class_comparison$Predicted_class), as.numeric(class_comparison$Observed_class))
+perf_KNN<- performance(predicted_KNN, "tpr", "fpr")
+
+plot(perf_KNN,
+     avg="threshold",
+     colorize=TRUE,
+     lwd=1,
+     main="ROC Curve for KNN",
+     print.cutoffs.at=seq(0, 1, by=0.05),
+     text.adj=c(-0.5, 0.5),
+     text.cex=0.5)
+grid(col="lightgray")
+axis(1, at=seq(0, 1, by=0.1))
+axis(2, at=seq(0, 1, by=0.1))
+abline(v=c(0.1, 0.3, 0.5, 0.7, 0.9), col="lightgray", lty="dotted")
+abline(h=c(0.1, 0.3, 0.5, 0.7, 0.9), col="lightgray", lty="dotted")
+lines(x=c(0, 1), y=c(0, 1), col="black", lty="dotted")
+```
+
+
+```{r}
+confusionMatrix(ct_KNN)
+```
+
+```{r}
+(auc_ROCR_KNN <- performance(predicted_KNN, measure = "auc"))
+```
+
+```{r}
+(auc_ROCR_KNN <- auc_ROCR_KNN@y.values[[1]])
+```
+
+
+## Random forest 
+
+### Sequential implementation of the random forest
+Starting with *sequential implementation of the random forest.* This is the original method of the random forest.
+Script that trains a random forest on sequential data and obtain OOB and  test errors
+
+The choice of a maximum number of leaves of 300 was also motivated by the fact that maximal trees did not bring much improvement in accuracy (see the figure below). Even 200 trees are satisfying.
+
+The data is already re-balanced, fire_size as factor
+
+```{r}
+library(readr)
+library(randomForest)
+library(plotly)
+
+
+##### Building the forest (sequentially...) -----------------------------------
+
+rfseq_train_time <- system.time({
+  rfseq_train <- randomForest(fire_class~., data=train, importance = T, ntree=300, maxnodes=500)
+
+  rfseq_train$err.rate[100]
+  print(rfseq_train)
+  plot(rfseq_train)
+})
+
+```
+
+
+*Model Validation*
+We will then check that the model is relevant.
+
+*Modification of the test data in order to see the performance of the model (have to have same factors as in the train set)*
+```{r}
+test$fire_class<-as.character(test$fire_class)
+test$fire_class <-  as.factor(test$fire_class)
+test$state <-  as.factor(test$state)
+test$discovery_month <-  as.factor(test$discovery_month)
+test$stat_cause_descr <-  as.factor(test$stat_cause_descr)
+test$Vegetation  <-  as.factor(test$Vegetation )
+```
+
+```{r}
+rf.results <- predict(rfseq_train, test, type="response")
+results_RF <- data.frame(actual = test$fire_class, prediction = rf.results)
+summary(results_RF)
+```
+
+Metriccs, et ROC 
+
+```{r}
+#Computing False positives and false negatives 
+#Computing False positives and false negatives 
+#ct_log_2 <- table(Y_pred_2,Y_test)
+
+#predicted1 <- prediction(as.numeric(predicted), as.numeric(y_test))
+ct_RF <- table(results_RF$prediction,results_RF$actual)
+
+cm_RF <- as.matrix(ct_RF)
+
+multi_class_rates_RF <- function(confusion_matrix) {
+    true_positives  <- diag(confusion_matrix)
+    false_positives <- colSums(confusion_matrix) - true_positives
+    false_negatives <- rowSums(confusion_matrix) - true_positives
+    true_negatives  <- sum(confusion_matrix) - true_positives -
+        false_positives - false_negatives
+    return(metrics <- data.frame(true_positives, false_positives, true_negatives,
+                      false_negatives, row.names = names(true_positives)))
+}
+
+multi_class_rates_RF(cm_RF)
+````
+
+```{r}
+class(results_RF$prediction)
+```
+
+
+```{r}
+#Y_pred_2 <- as.factor(Y_pred_2)
+
+precision_RF <- posPredValue(results_RF$prediction,results_RF$actual, positive="1")
+
+sensitivity_RF <- sensitivity(results_RF$prediction, results_RF$actual, positive="1")
+
+specificity_RF <- specificity(results_RF$prediction,results_RF$actual, negative = "0")
+F1_RF <- (2 * precision_RF * sensitivity_RF) / (precision_RF + sensitivity_RF)
+
+specificity_RF
+sensitivity_RF
+precision_RF
+F1_RF
+```
+
+```{r}
+library(ROCR)
+library(ggplot2)
+predicted_RF <- prediction(as.numeric(results_RF$prediction), as.numeric(results_RF$actual))
+perf_RF<- performance(predicted_RF, "tpr", "fpr")
+
+plot(perf_RF,
+     avg="threshold",
+     colorize=TRUE,
+     lwd=1,
+     main="ROC Curve for Random Forest",
+     print.cutoffs.at=seq(0, 1, by=0.05),
+     text.adj=c(-0.5, 0.5),
+     text.cex=0.5)
+grid(col="lightgray")
+axis(1, at=seq(0, 1, by=0.1))
+axis(2, at=seq(0, 1, by=0.1))
+abline(v=c(0.1, 0.3, 0.5, 0.7, 0.9), col="lightgray", lty="dotted")
+abline(h=c(0.1, 0.3, 0.5, 0.7, 0.9), col="lightgray", lty="dotted")
+lines(x=c(0, 1), y=c(0, 1), col="black", lty="dotted")
+```
+
+```{r}
+confusionMatrix(ct_RF)
+```
+
+```{r}
+(auc_ROCR_RF <- performance(predicted_RF, measure = "auc"))
+```
+
+```{r}
+(auc_ROCR_RF <- auc_ROCR_RF@y.values[[1]])
+```
+
+
+### Some information on the decision tree
+
+
+*Drawing the decision tree.*
+
+We will show only one tree, but using random forest with bootstrapping 
+
+```{r}
+DT <- rpart(train$fire_class~., data = train, method= "class", minbucket = 1)
+
+plot(DT, uniform=TRUE, branch=0.5, margin=0.1)
+text(DT, all=FALSE, use.n=TRUE)
+#DT =rpart(train$fire_class~.,)
+#plot(DT); text(DT)
+```
+
+*Importance of variables*
+
+We can therefore continue and observe the importance of the variables in our created model.
+GINI importance of variables: 
+The importance of the variables in the model, for this we will use the Mean Decrease Gini index. The higher this indicator is, the more important the variable is in the model (it measures the decrease of the Gini index if we don't include this variable in the model anymore).
+
+```{r}
+varImpPlot(rfseq_train, main = "Importance of variables in Random Forest", cex = 0.7)
+```
+
+The interest of pruning to simplify it and to avoid over-fitting.
+
+The graph below shows the rate of poor grading according to the size of the tree. The aim is to minimize the error.
+
+The complexity parameter (cp) is used to control the size of the decision tree and to select the optimal tree size. If the cost of adding another variable.
+
+```{r}
+#We try to minimize the error to define the pruning level.
+plotcp(DT)
+```
+
+```{r}
+#Optimal cp display
+print(DT$cptable[which.min(DT$cptable[,4]),1])
+```
+
+```{r}
+#Elagage de l’arbre avec le cp optimal
+DT_Opt <- prune(DT,cp=DT$cptable[which.min(DT$cptable[,4]),1])
+
+#Représentation graphique de l’arbre optimal
+prp(DT_Opt,extra=1)
+```
+
+
+### Standard Random forest in parallel
+```{r}
+#RF in parallel
+ncores=4
+library(foreach)
+library(doMC)
+registerDoMC(4)
+rf_parallel_time <- system.time({
+rf <- foreach(ntree=rep(75,4), .combine=randomForest::combine,
+              .multicombine=TRUE, .packages='randomForest') %dopar% {
+    randomForest(fire_class~., data=train, ntree=ntree)
+}
+})
+
+print(rf)
+```
+
+*Computing test error*
+```{r}
+print("computing test error...")
+nbobs <- nrow(test)
+
+# test error is computed in parallel (4 cores)
+ncores = 4
+library(parallel)
+test_seq <- mclapply(1:ncores, function(ind) {
+  indexes <- ((ind-1)*nbobs/ncores+1):(ind*nbobs/ncores)
+  predTest <- predict(rfseq_train, test[indexes,-23], type="vote") #deleting our explained variable from the test
+  predTest <- levels(train$fire_class)[unlist(apply(predTest, 1, which.max))]
+  errTest <- sum(predTest != test$fire_class[indexes])
+  return(errTest)
+}, mc.cores = 4)
+test_seq <- sum(unlist(test_seq))/nbobs
+print(test_seq)
+```
+
+The direct implementation of RF in parallel is very limited if the sample size is large because it requires to handle in parallel several bootstrap samples of the same size than the original dataset. 
+
+**Thus, variants of the bootstrap step are introduced.** 
+
+The first and the most simple approach **to reduce the bootstrap sample size is subsampling** (denoted by sampRF)
+that can be combined either with sequential or parallel implementations.
+
+###  Sub-sampling Random Forest (sampRF)
+*Creating subsamples*
+```{r}
+propSample <- 0.1 # sampling fraction
+ncores <- 4 # number of cores used for training the forest
+total_nbtrees <- 300 # total number of trees in the forest
+
+
+# Sampling then building the forest (in parallel) -----------------------------
+print("sampling...")
+myTimeSampling <- system.time({
+  # subsample in class fire_class =1 
+  mySample <- sample(which(train$fire_class == 1),
+                     round(propSample * nrow(train)), 
+                     replace = FALSE)
+
+  # subsample in fire_class =0 (half of the observations)
+  mySample <- c(mySample,
+               sample(which(train$fire_class != 1),
+                      round(propSample * nrow(train)),
+                      replace = FALSE))
+  # final subsample
+  samptrain <- train[mySample, ]
+})
+
+print("training...")
+nbtrees <- total_nbtrees/ncores
+myTimeTrain <-system.time({
+  rfSamp_train <- mclapply(1:ncores, function(ind) {
+    res <- randomForest(fire_class~., data=samptrain, ntree=nbtrees, maxnodes=500)
+    return(res)
+  }, mc.cores = ncores)
+})
+
+```
+
+*Computing errForest*
+```{r}
+##### Computing errForest -----------------------------------------------------
+print("computing training OOB errors...")
+predOOB <- mclapply(1:ncores, function(ind) {
+  # prediction (standard for out of subsample observations and OOB for subsample
+  # observations)
+  res <- predict(rfSamp_train[[ind]], train, type="vote")*nbtrees
+  res[mySample, ] <- predict(rfSamp_train[[ind]], type="vote")*nbtrees
+  return(res)
+}, mc.cores = ncores)
+
+# set to 0 all observations with NA (this will not be used while computing the 
+# majority vote law)
+predOOB <- mclapply(predOOB, function(amatrix) {
+  newmatrix <- amatrix
+  newmatrix[is.na(newmatrix)] <- 0
+  return(newmatrix)
+}, mc.cores = ncores)
+
+# combine all predictions that were obtained in parallel
+predOOB <- Reduce("+", predOOB)
+predOOB <- levels(train$fire_class)[unlist(apply(predOOB, 1, which.max))]
+errOOB <- (predOOB != train$fire_class)
+errOOB <- sum(errOOB) / length(errOOB)
+print(errOOB)
+# errForest is: errOOB
+```
+
+```{r}
+##### Computing BDerrForest:  ---------------------------------------------------
+estOOB <- (predOOB != train$fire_class)[mySample]
+estOOB <-  sum(estOOB)/length(estOOB)
+
+print("computing BDerrForest: approximation of OOB in sampRF ...")
+print(estOOB)
+# BDerrForest is: estOOB
+
+# BDerrForest : approximation of OOB in sampRF, blbRF, moonRF
+
+```
+
+```{r}
+##### Computing test error ----------------------------------------------------
+print("computing test error...")
+nbobs <- nrow(test)
+
+# test error is computed sequentially
+predTest <- lapply(rfSamp_train, function(forest){
+  test_er <- predict(forest, test[,-23], type="vote") 
+  return(test_er)}
+)
+
+predTest <- Reduce("+", predTest)
+predTest <- levels(test$fire_class)[unlist(apply(predTest, 1, which.max))]
+errTest <- mean(predTest != test$fire_class)
+print(errTest)
+
+#0.05021223
+```
+
+The other methods, sampRF, moonRF, dacRF, which involve parallel implementation and variants of bootstrapping, were then run on the same dataset. 
+
+In all simulations, the maximum number of leaves in the trees was set to 300. 
+We will only  compare the methods themselves, all subsamplings were done in such a way that the subsamples were fairly representative of the whole dataset. This was performed by a simple random sampling within the dataset.
+
+The different results are compared through:
+- the computational time needed by every method  
+- the prediction performance.
+
+### The m-out-of-n bootstrap (moonRF)
+
+The m-out-of-n bootstrap that proceeds by building boot- strap samples with only m observations taken without replacement in {1,...,n} (for m≪n). 
+
+Initially designed to address the computational burden of standard bootstrapping, the method performance is strongly dependent on a convenient choice of m and the data-driven scheme proposed in [30] for the selection of m requires to test several different values of m and eliminates computational gains.
+
+--> mclapply is a parallelized version of lapply. And The lapply() function allows you to apply a function to each item in a list.
+
+**ind** is the loop variable that will successively take all vector values. Vector usually takes the form 1:n, but it can also be a character vector. For each of these values, the instructions will be repeated.
+
+```{r}
+### The forest is trained in parallel using ncores.
+##### -------------------------------------------------------------------------
+
+##### Set parameters ----------------------------------------------------------
+propSample <- 0.1 # fraction of the total number of observations used to
+# build subsamples, so here we will use 0.1% of the sample
+total_nbtrees <- 300 # total number of trees in the forest
+ncores <- 4 # number of cores
+
+  
+##### Drawing subsamples and building the forest (in parallel) -----------------
+print("training...")
+
+mySample = sample(which(train$fire_class==1),
+                      round(propSample*nrow(train)), FALSE)
+mySample = c(mySample,
+                 sample(which(train$fire_class!=1),
+                        round(propSample*nrow(train)), FALSE))
+sampSimulated = train[mySample, ]
+
+
+myTimeTrain <-system.time({
+  moonRF <- mclapply(1:total_nbtrees, function(ind) {
+    res = randomForest(fire_class~., data=sampSimulated, ntree=1, maxnodes=500,
+                       replace=FALSE, sampsize=nrow(sampSimulated))
+    return(list(forest=res, mySample=mySample))
+  }, mc.cores=ncores)
+})
+```
+
+```{r}
+
+##### Computing BDerrForest --> approximation of OOB in sampRF, moonRF
+
+print("computing OOB errors...")
+myTimeBDErr <- system.time({
+  allSamples <- lapply(moonRF, "[[", 2)
+  allUnique <- unique(unlist(allSamples))
+  nbofUnique <- length(allUnique)
+  predOOB = mclapply(1:total_nbtrees, function(ind) {
+    OOBvotes <- matrix(0, ncol = 2, nrow = nbofUnique)
+    rownames(OOBvotes) <- sort(allUnique)
+    OOBunique <- sort(unique(unlist(allSamples[-ind])))
+    OOBvotes[which(rownames(OOBvotes) %in% OOBunique),] = predict(moonRF[[ind]]$forest, train[OOBunique,], type="vote")
+    return(OOBvotes)
+  }, mc.cores=ncores)
+  predOOB = Reduce("+", predOOB)
+  predOOB = levels(train$fire_class)[unlist(apply(predOOB, 1, which.max))]
+  estOOB = (predOOB != train[sort(allUnique),]$fire_class)
+  estOOB = sum(estOOB)/length(estOOB)
+})
+print(estOOB)
+# BDerrForest is: estOOB
+#The estOOB is 22,59694%
+```
+
+```{r}
+##### Computing errForest -----------------------------------------------------
+
+# errForest is computed sequentially
+myTimeErrOOB <- system.time({
+  predOOB = lapply(1:total_nbtrees, function(ind) {
+    print(ind)
+    res = predict(moonRF[[ind]]$forest, train, type="vote")
+    res[moonRF[[ind]]$mySample,] = 0
+    return(res)
+  })
+  predOOB = Reduce("+", predOOB)
+  predOOB = levels(train$fire_class)[unlist(apply(predOOB, 1, which.max))]
+  errOOB = (predOOB != train$fire_class)
+  errOOB = sum(errOOB)/length(errOOB)
+})
+
+print("computing errors. of the forest ..")
+print(errOOB)
+# errForest is: errOOB = 0.232565
+
+```
+
+```{r}
+##### Computing test error ----------------------------------------------------
+print("computing test error...")
+
+nbobs <- nrow(test)
+
+# test error is computed sequentially
+myTimeTest <- system.time({
+  predTest = lapply(1:total_nbtrees, function(ind) {
+    predict(moonRF[[ind]]$forest, test, type="vote")})
+  predTest = Reduce("+", predTest)
+  
+  predTest = levels(test$fire_class)[unlist(apply(predTest, 1, which.max))]
+  errTest = mean(predTest != test$fire_class)
+})
+print(errTest)
+```
+
+
+### DacRF (divide and conquer)
+```{r}
+##### Script description ------------------------------------------------------
+# Script that trains a random forest with the divide-and-conquer approach
+# (dacRF). The forest is trained in parallel using ncores.
+##### -------------------------------------------------------------------------
+train<- as.data.frame(train)
+train$fire_class <- as.factor(train$fire_class)
+
+library(readr)
+library(parallel)
+library(randomForest)
+
+##### Set parameters ----------------------------------------------------------
+nbchunks <- 4 # number of chunks
+nbtrees <- 75 # number of trees in each subforest
+ncores <- 4 # number of cores
+
+##### Loading the data --------------------------------------------------------
+nbobs <- nrow(train)
+
+```
+
+```{r}
+##### Spliting the data and building the forest (in parallel) -----------------
+
+nbchunks <- 4 # number of chunks
+nbtrees <- 75 # number of trees in each subforest
+ncores <- 4 # number of cores
+
+rows <- sample(nrow(train))
+train <- train[rows,]
+train <- as.data.frame(train)
+
+
+library(foreach)
+library(doMC)
+registerDoMC(4)
+dac_rf_time <- system.time({
+dac_rf <- foreach(i =1:4, .combine=randomForest::combine,
+              .multicombine=TRUE, .packages='randomForest') %dopar% {
+    randomForest(fire_class~., data=train[(1+(i-1)*11073):(i*11073),], ntree=75)
+}
+})
+
+print(dac_rf)
+
+```
+
+```{r}
+##### Computing test error ----------------------------------------------------
+
+print("computing test error...")
+nbobs <- nrow(test)
+
+# test error is computed in parallel (4 cores)
+ncores = 4
+library(parallel)
+test_dacRF <- mclapply(1:ncores, function(ind) {
+  indexes <- ((ind-1)*nbobs/ncores+1):(ind*nbobs/ncores)
+  predTest <- predict(dac_rf, test[indexes,-23], type="vote") #deleting our explained variable from the test
+  predTest <- levels(train$fire_class)[unlist(apply(predTest, 1, which.max))]
+  errTest <- sum(predTest != test$fire_class[indexes])
+  return(errTest)
+}, mc.cores = 4)
+test_dacRF <- sum(unlist(test_dacRF))/nbobs
+print(test_dacRF)
+```
+
+
+## XGBoost 
+
+
+```{r}
+library(tidyverse)
+library(xgboost)
+library(caret)
+library(readxl)
+library(FastDummies)
+```
+
+```{r}
+train_xg <-  train[,]
+test_xg <- test[,]
+train_xg <- dummy_cols(train_xg, select_columns = c("Vegetation", "state","discovery_month", "stat_cause_descr"))
+test_xg <- dummy_cols(test_xg, select_columns = c("Vegetation", "state","discovery_month", "stat_cause_descr"))
+
+train_xg  <- dummy_cols(train_xg, select_columns = c("Vegetation", "state","discovery_month", "stat_cause_descr"),
+           remove_selected_columns = TRUE)
+
+test_xg  <- dummy_cols(test_xg, select_columns = c("Vegetation", "state","discovery_month", "stat_cause_descr"),
+           remove_selected_columns = TRUE)
+
+```
+
+```{r}
+class(train_xg$Vegetation_Grassland)
+class(test_xg$Vegetation_Desert)
+```
+
+
+```{r}
+#On sépare ensuite le vecteur réponse y de la matrice X des prédicteurs pour les deux échantillons.
+X_train = xgb.DMatrix(as.matrix(train_xg %>% select(-fire_class)))
+y_train = train_xg$fire_class
+X_test = xgb.DMatrix(as.matrix(test_xg %>% select(-fire_class)))
+y_test = test_xg$fire_class
+```
+
+
+On va donc commencer par définir un objet trainControl, qui permet de contrôler la manière dont se fait l’entraînement du modèle, assuré par la fonction train().
+
+Ici, nous choisissons une validation croisée (method = ‘cv’) à 5 folds (number = 5). On choisit également d’autoriser la parallélisation des calculs (allowParallel = TRUE), de réduire la verbosité (verboseIter = FALSE).
+
+```{r}
+xgb_trcontrol = trainControl(method = "cv", number = 5, allowParallel = TRUE, 
+    verboseIter = FALSE, returnData = FALSE)
+```
+
+```{r}
+xgbGrid <- expand.grid(nrounds = c(100,200),  
+                       max_depth = c(3, 5, 10, 15, 20),
+                       colsample_bytree = seq(0.5, 0.9, length.out = 5),
+                       ## valeurs par défaut : 
+                       eta = 0.1,
+                       gamma=0,
+                       min_child_weight = 1,
+                       subsample = 1
+                      )
+```
+
+Training the model 
+```{r}
+set.seed(0)
+xgb_model = train(X_train, y_train, trControl = xgb_trcontrol, tuneGrid = xgbGrid, 
+    method = "xgbTree")
+```
+
+```{r}
+xgb_model$bestTune
+```
+
+
+```{r}
+predicted_XGB = predict(xgb_model, X_test)
+ct_XGB <- table(predicted_XGB,y_test)
+#length(predicted_XGB)
+#length(y_test)
+cm_XGB <- as.matrix(ct_XGB)
+```
+
+```{r}
+#Computing False positives and false negatives 
+
+multi_class_rates_XGB <- function(confusion_matrix) {
+    true_positives  <- diag(confusion_matrix)
+    false_positives <- colSums(confusion_matrix) - true_positives
+    false_negatives <- rowSums(confusion_matrix) - true_positives
+    true_negatives  <- sum(confusion_matrix) - true_positives -
+        false_positives - false_negatives
+    return(metrics <- data.frame(true_positives, false_positives, true_negatives,
+                      false_negatives, row.names = names(true_positives)))
+}
+
+multi_class_rates_XGB(cm_XGB)
+```
+
+```{r}
+#library caret is needed.
+xtab <- table(predicted_XGB,y_test)
+confusionMatrix(xtab)
+```
+
+In statistical analysis of binary classification, the F-score or F-measure is a measure of a test's accuracy. It is calculated from the precision and recall of the test, where the precision is the number of correctly identified positive results divided by the number of all positive results, including those not identified correctly, and the recall is the number of correctly identified positive results divided by the number of all samples that should have been identified as positive.
+
+```{r}
+precision_XGB <- posPredValue(predicted_XGB, y_test, positive="1")
+sensitivity_XGB <- sensitivity(predicted_XGB, y_test, positive="1")
+specificity_XGB <- specificity(predicted_XGB, y_test, negative = "0")
+F1_XGB <- (2 * precision_XGB * sensitivity_XGB) / (precision_XGB + sensitivity_XGB)
+
+specificity_XGB
+sensitivity_XGB
+precision_XGB
+F1_XGB
+```
+
+
+
+```{r}
+predicted_XGB1 <- prediction(as.numeric(predicted_XGB), as.numeric(y_test))
+xgb.perf <- performance(predicted_XGB1, "tpr", "fpr")
+
+###
+library(pROC)
+Y_test_roc <- as.numeric(y_test)
+predicted_XGB_roc <- as.numeric(predicted_XGB)
+roc_XGB <- plot.roc(Y_test_roc, predicted_XGB_roc, main="ROC comparison", percent=TRUE, col= "red")
+roc_xgboost <- lines.roc(Y_test_roc, predicted_XGB_roc, percent=TRUE, col="blue")
+###
+
+plot(xgb.perf,
+     avg="threshold",
+     colorize=TRUE,
+     lwd=1,
+     main="ROC Curve for XGBoost",
+     print.cutoffs.at=seq(0, 1, by=0.05),
+     text.adj=c(-0.5, 0.5),
+     text.cex=0.5)
+grid(col="lightgray")
+axis(1, at=seq(0, 1, by=0.1))
+axis(2, at=seq(0, 1, by=0.1))
+abline(v=c(0.1, 0.3, 0.5, 0.7, 0.9), col="lightgray", lty="dotted")
+abline(h=c(0.1, 0.3, 0.5, 0.7, 0.9), col="lightgray", lty="dotted")
+lines(x=c(0, 1), y=c(0, 1), col="black", lty="dotted")
+```
+```{r}
+(auc_ROCR_XGB <- performance(predicted_XGB1, measure = "auc"))
+```
+
+```{r}
+(auc_ROCR_XGB <- auc_ROCR_XGB@y.values[[1]])
+```
+
+
+
+
+
+
+
